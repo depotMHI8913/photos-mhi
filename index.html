@@ -128,7 +128,32 @@ function showForm() {
   $('#prev').innerHTML = ''; for (const p of pending) { const i = new Image(); i.src = p.url; $('#prev').appendChild(i); }
   $('#who').value = LS.get('mhi-who', ''); $('#plaque').value = ''; $('#note').value = ''; paintGps(); paintPlate(); setTimeout(() => $('#plaque').focus(), 300);
 }
-function addFiles(list, cam) { for (const f of list) if (/^image\//.test(f.type) || /\.(jpe?g|png|heic|heif)$/i.test(f.name)) pending.push({ file: f, ts: cam ? Date.now() : (f.lastModified || Date.now()), cam, url: URL.createObjectURL(f) }); if (pending.length) showForm(); }
+/* date de prise de vue écrite par l'appareil (EXIF DateTimeOriginal) */
+async function exifDate(file) {
+  try { const b = new DataView(await file.slice(0, 131072).arrayBuffer()); if (b.getUint16(0) !== 0xFFD8) return null; let o = 2;
+    while (o + 4 < b.byteLength) { const m = b.getUint16(o), len = b.getUint16(o + 2); if (m === 0xFFE1 && b.getUint32(o + 4) === 0x45786966) { const t = o + 10, le = b.getUint16(t) === 0x4949;
+        const u16 = (x) => b.getUint16(x, le), u32 = (x) => b.getUint32(x, le); const ifd = (x, want) => { const n = u16(t + x); for (let i = 0; i < n; i++) { const e = t + x + 2 + i * 12; if (u16(e) === want) return e; } return 0; };
+        const ex = ifd(u32(t + 4), 0x8769); if (!ex) return null; const d = ifd(u32(ex + 8), 0x9003); if (!d) return null; const off = t + u32(d + 8); let str = ''; for (let i = 0; i < 19; i++) str += String.fromCharCode(b.getUint8(off + i));
+        const m2 = /^(\d{4}):(\d\d):(\d\d) (\d\d):(\d\d):(\d\d)/.exec(str); if (!m2) return null; const dt = new Date(+m2[1], +m2[2] - 1, +m2[3], +m2[4], +m2[5], +m2[6]).getTime(); return isFinite(dt) ? dt : null; }
+      if ((m & 0xFF00) !== 0xFF00) break; o += 2 + len; } } catch (e) { /* pas de date */ }
+  return null;
+}
+/* photo réduite avant l'envoi : 2400 px de côté au maximum, sans recadrage ni filtre — la plaque reste parfaitement lisible, l'envoi est 5 à 10 fois plus rapide */
+const MAXPX = 2400;
+async function shrink(file) {
+  const exif = await exifDate(file);
+  try {
+    const url = URL.createObjectURL(file); const img = new Image(); img.decoding = 'async';
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; }); URL.revokeObjectURL(url);
+    const w = img.naturalWidth, h = img.naturalHeight, k = Math.min(1, MAXPX / Math.max(w, h));
+    if (k >= 1 && file.size < 1.5e6 && /jpe?g/i.test(file.type)) return { blob: file, mime: file.type, exif };
+    const c = document.createElement('canvas'); c.width = Math.round(w * k); c.height = Math.round(h * k);
+    const x = c.getContext('2d'); x.imageSmoothingQuality = 'high'; x.drawImage(img, 0, 0, c.width, c.height);
+    const blob = await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.86)); c.width = c.height = 0;
+    return blob && blob.size < file.size ? { blob, mime: 'image/jpeg', exif } : { blob: file, mime: file.type || 'image/jpeg', exif };
+  } catch (e) { return { blob: file, mime: file.type || 'image/jpeg', exif }; }
+}
+function addFiles(list, cam) { for (const f of list) if (/^image\//.test(f.type) || /\.(jpe?g|png|heic|heif)$/i.test(f.name)) pending.push({ file: f, ts: cam ? Date.now() : (f.lastModified || Date.now()), cam, url: URL.createObjectURL(f), prep: shrink(f) }); if (pending.length) showForm(); }
 $('#cam').onclick = () => { locate(); $('#fcam').value = ''; $('#fcam').click(); };
 $('#gal').onclick = () => { $('#fgal').value = ''; $('#fgal').click(); };
 $('#fcam').onchange = (e) => addFiles(e.target.files, true);
@@ -145,8 +170,9 @@ $('#send').onclick = async () => {
   if (!plateOk($('#plaque').value)) { paintPlate(); $('#plaque').focus(); return; }
   const who = $('#who').value.trim(); LS.set('mhi-who', who);
   const common = { r: cur.r, k: cur.k, plate: $('#plaque').value.trim(), note: $('#note').value.trim(), who };
-  for (const p of pending) { await qPut(Object.assign({ id: uid(), blob: p.file, name: p.file.name || 'photo.jpg', mime: p.file.type || 'image/jpeg', ts: p.ts, cam: p.cam, lat: p.cam && fix ? fix.lat : null, lon: p.cam && fix ? fix.lon : null, acc: p.cam && fix ? fix.acc : null, state: 'wait', added: Date.now() }, common)); URL.revokeObjectURL(p.url); }
-  pending = []; $('#form').classList.add('hide'); $('#pick').classList.remove('hide');
+  $('#send').disabled = true; $('#send').textContent = 'Préparation…';
+  for (const p of pending) { const pr = await p.prep; const ts = p.cam ? p.ts : (pr.exif || p.ts); await qPut(Object.assign({ id: uid(), blob: pr.blob, name: (p.file.name || 'photo').replace(/\.\w+$/, '') + '.jpg', mime: pr.mime, ts, tsSrc: p.cam ? 'camera' : pr.exif ? 'exif' : 'fichier', cam: p.cam, lat: p.cam && fix ? fix.lat : null, lon: p.cam && fix ? fix.lon : null, acc: p.cam && fix ? fix.acc : null, state: 'wait', added: Date.now() }, common)); URL.revokeObjectURL(p.url); }
+  pending = []; $('#send').textContent = 'Envoyer'; $('#form').classList.add('hide'); $('#pick').classList.remove('hide');
   await paintQueue(); flush();
 };
 
@@ -155,16 +181,18 @@ let flushing = false;
 async function flush() {
   if (flushing || !navigator.onLine) return; flushing = true;
   try {
-    for (const it of (await qAll()).filter((x) => x.state === 'wait' || x.state === 'up').sort((a, b) => a.added - b.added)) {
+    const todo = (await qAll()).filter((x) => x.state === 'wait' || x.state === 'up').sort((a, b) => a.added - b.added); let stop = false;
+    const one = async (it) => {
       it.state = 'up'; await qPut(it); paintQueue();
       try {
-        const body = JSON.stringify({ a: 'up', k: it.k, id: it.id, name: it.name, mime: it.mime, b64: await b64(it.blob), ts: it.ts, cam: it.cam, lat: it.lat, lon: it.lon, acc: it.acc, plate: it.plate, note: it.note, who: it.who });
+        const body = JSON.stringify({ a: 'up', k: it.k, id: it.id, name: it.name, mime: it.mime, b64: await b64(it.blob), ts: it.ts, tsSrc: it.tsSrc || (it.cam ? 'camera' : 'fichier'), cam: it.cam, lat: it.lat, lon: it.lon, acc: it.acc, plate: it.plate, note: it.note, who: it.who });
         const r = await (await fetch(relayUrl(it.r), { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body })).json();
         if (r.ok) { it.state = 'ok'; it.done = Date.now(); delete it.blob; it.err = ''; } else { it.state = 'bad'; it.err = r.err || 'refusé'; }
-      } catch (e) { it.state = 'wait'; it.err = navigator.onLine ? 'Envoi interrompu, nouvel essai bientôt' : ''; }
+      } catch (e) { it.state = 'wait'; it.err = navigator.onLine ? 'Envoi interrompu, nouvel essai bientôt' : ''; stop = true; }
       await qPut(it); paintQueue();
-      if (it.state === 'wait') break;
-    }
+    };
+    const workers = Array.from({ length: Math.min(3, todo.length) }, async () => { while (todo.length && !stop) await one(todo.shift()); });   // 3 envois en parallèle
+    await Promise.all(workers);
     for (const it of await qAll()) if (it.state === 'ok' && Date.now() - it.done > 7 * 864e5) await qDel(it.id);   // historique : 7 jours
   } finally { flushing = false; }
 }

@@ -46,6 +46,7 @@
   .err { background: #fdecea; color: var(--bad); padding: 12px; border-radius: 10px; }
   .hide { display: none !important; }
   .gps { font-size: 12px; color: var(--sub); margin-top: 6px; }
+  .qsum { margin-top: 6px; font-size: 14px; font-weight: 600; } .qsum.ok { color: var(--ok); } .qsum.wait { color: var(--warn); } .qsum:empty { display: none; }
   .off { background: var(--warn); color: #fff; text-align: center; font-size: 13px; padding: 6px; }
 </style>
 </head>
@@ -91,9 +92,10 @@
       <div class="row"><button class="btn ghost" id="cancel" type="button">Annuler</button><button class="btn" id="send" type="button">Envoyer</button></div>
     </div>
     <p class="muted hide" id="who-line" style="text-align:center;margin:4px 0 14px">Vous envoyez en tant que <b id="who-t2"></b> · <a href="#" id="who-chg2" style="color:var(--bleu)">modifier</a></p>
-    <div class="card hide" id="qcard"><b style="font-size:15px">Envois</b><div id="queue" style="margin-top:6px"></div></div>
+    <div class="card hide" id="qcard"><b style="font-size:15px">Envois</b><div class="qsum" id="qsum"></div><div id="queue" style="margin-top:6px"></div></div>
   </div>
 </main>
+<script src="envoi.js"></script>
 <script>
 'use strict';
 /* lien : ?r=<relais Apps Script>&k=<code du site> — gardé sur le téléphone pour les ouvertures suivantes */
@@ -141,12 +143,8 @@ async function checkSite() {
   paintSite();
 }
 
-/* file d'attente (IndexedDB) : rien n'est perdu sans réseau ni si la page est fermée */
-const DB = new Promise((res, rej) => { const o = indexedDB.open('mhi-depot', 1); o.onupgradeneeded = () => o.result.createObjectStore('q', { keyPath: 'id' }); o.onsuccess = () => res(o.result); o.onerror = () => rej(o.error); });
-const tx = async (mode, fn) => { const db = await DB; return new Promise((res, rej) => { const t = db.transaction('q', mode); const s = t.objectStore('q'); const r = fn(s); t.oncomplete = () => res(r && r.result); t.onerror = () => rej(t.error); }); };
-const qAll = () => tx('readonly', (s) => s.getAll());
-const qPut = (o) => tx('readwrite', (s) => s.put(o));
-const qDel = (id) => tx('readwrite', (s) => s.delete(id));
+/* file d'attente (IndexedDB, partagée avec le service worker) : rien n'est perdu sans réseau ni si la page est fermée */
+const qAll = MHIQ.all, qPut = MHIQ.put, qDel = MHIQ.del;
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2)).replace(/-/g, '').slice(0, 24);
 
 let pending = [];   // photos choisies, pas encore envoyées : [{file, ts, cam}]
@@ -171,30 +169,46 @@ async function exifDate(file) {
       if ((m & 0xFF00) !== 0xFF00) break; o += 2 + len; } } catch (e) { /* pas de date */ }
   return null;
 }
-/* photo réduite avant l'envoi : 2400 px de côté au maximum, sans recadrage ni filtre — la plaque reste parfaitement lisible, l'envoi est 5 à 10 fois plus rapide */
-const MAXPX = 2400;
+/* photo réduite avant l'envoi : 2048 px de côté au maximum, sans recadrage ni filtre — la plaque reste parfaitement lisible, l'envoi est beaucoup plus rapide */
+const MAXPX = 2048, QUAL = 0.82;
 /* empreinte SHA-256 : identifie le fichier ; la moindre retouche la change complètement */
 async function sha(blob) { try { const d = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer()); return [...new Uint8Array(d)].map((x) => x.toString(16).padStart(2, '0')).join(''); } catch (e) { return ''; } }
 async function shrink(file) { const r = await shrink0(file); r.h0 = await sha(file); r.sz0 = file.size; r.h1 = r.blob === file ? r.h0 : await sha(r.blob); return r; }
 async function shrink0(file) {
   const exif = await exifDate(file);
   try {
-    const url = URL.createObjectURL(file); const img = new Image(); img.decoding = 'async';
-    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; }); URL.revokeObjectURL(url);
-    const w = img.naturalWidth, h = img.naturalHeight, k = Math.min(1, MAXPX / Math.max(w, h));
-    if (k >= 1 && file.size < 1.5e6 && /jpe?g/i.test(file.type)) return { blob: file, mime: file.type, exif };
+    /* décodage hors de l'écran (plus rapide, la page reste fluide) ; sinon méthode classique */
+    let img = null, bm = null; try { bm = await createImageBitmap(file, { imageOrientation: 'from-image' }); } catch (e) { bm = null; }
+    if (!bm) { const url = URL.createObjectURL(file); img = new Image(); img.decoding = 'async'; await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; }); URL.revokeObjectURL(url); }
+    const w = bm ? bm.width : img.naturalWidth, h = bm ? bm.height : img.naturalHeight, k = Math.min(1, MAXPX / Math.max(w, h));
+    if (k >= 1 && file.size < 1.2e6 && /jpe?g/i.test(file.type)) { if (bm) bm.close(); return { blob: file, mime: file.type, exif }; }
     const c = document.createElement('canvas'); c.width = Math.round(w * k); c.height = Math.round(h * k);
-    const x = c.getContext('2d'); x.imageSmoothingQuality = 'high'; x.drawImage(img, 0, 0, c.width, c.height);
-    const blob = await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.86)); c.width = c.height = 0;
+    const x = c.getContext('2d'); x.imageSmoothingQuality = 'high'; x.drawImage(bm || img, 0, 0, c.width, c.height); if (bm) bm.close();
+    const blob = await new Promise((res) => c.toBlob(res, 'image/jpeg', QUAL)); c.width = c.height = 0;
     return blob && blob.size < file.size ? { blob, mime: 'image/jpeg', exif } : { blob: file, mime: file.type || 'image/jpeg', exif };
   } catch (e) { return { blob: file, mime: file.type || 'image/jpeg', exif }; }
 }
-function addFiles(list, cam) { for (const f of list) if (/^image\//.test(f.type) || /\.(jpe?g|png|heic|heif)$/i.test(f.name)) pending.push({ file: f, ts: cam ? Date.now() : (f.lastModified || Date.now()), cam, url: URL.createObjectURL(f), prep: shrink(f) }); if (pending.length) showForm(); }
+/* chaque photo choisie part tout de suite vers MyHome Immobilier, pendant que la personne tape la plaque */
+let batch = null;
+const kick = () => MHIQ.flush().catch(() => {}).then(paintQueue);
+function addFiles(list, cam) {
+  if (!batch) batch = uid();
+  for (const f of list) if (/^image\//.test(f.type) || /\.(jpe?g|png|heic|heif)$/i.test(f.name)) {
+    const p = { id: uid(), file: f, ts: cam ? Date.now() : (f.lastModified || Date.now()), cam, url: URL.createObjectURL(f) }; const bt = batch;
+    p.prep = shrink(f).then(async (pr) => { if (p.gone || !cur) return pr; const ts = cam ? p.ts : (pr.exif || p.ts);
+      await qPut({ id: p.id, batch: bt, state: 'draft', added: Date.now(), r: cur.r, k: cur.k, blob: pr.blob, mime: pr.mime, name: (f.name || 'photo').replace(/\.\w+$/, '') + '.jpg', ts, tsSrc: cam ? 'camera' : pr.exif ? 'exif' : 'fichier', h0: pr.h0 || '', sz0: pr.sz0 || null, h1: pr.h1 || '', cam });
+      kick(); return pr; });
+    pending.push(p);
+  }
+  if (pending.length) showForm();
+}
+/* « Annuler » : les photos déjà parties sont effacées du relais */
+async function dropDrafts(ps) { const ids = []; for (const p of ps) { p.gone = true; URL.revokeObjectURL(p.url); const it = await MHIQ.get(p.id); if (it) { if (it.uploaded) ids.push(it.id); await qDel(it.id); } } if (ids.length && cur) MHIQ.post(cur.r, { a: 'drop', k: cur.k, ids }, true).catch(() => {}); }
 $('#cam').onclick = () => { locate(); $('#fcam').value = ''; $('#fcam').click(); };
 $('#gal').onclick = () => { $('#fgal').value = ''; $('#fgal').click(); };
 $('#fcam').onchange = (e) => addFiles(e.target.files, true);
 $('#fgal').onchange = (e) => addFiles(e.target.files, false);
-$('#cancel').onclick = () => { for (const p of pending) URL.revokeObjectURL(p.url); pending = []; $('#form').classList.add('hide'); $('#pick').classList.remove('hide'); paintIdent(false); };
+$('#cancel').onclick = () => { dropDrafts(pending); pending = []; batch = null; $('#form').classList.add('hide'); $('#pick').classList.remove('hide'); paintIdent(false); };
 const CH = /^(AG|AI|AR|BE|BL|BS|FR|GE|GL|GR|JU|LU|NE|NW|OW|SG|SH|SO|SZ|TG|TI|UR|VD|VS|ZG|ZH)[0-9]{1,6}$/;
 const plateKey = (v) => String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 const plateOk = (v) => { const k = plateKey(v); return k.length >= 4 && /[0-9]/.test(k); };
@@ -206,39 +220,30 @@ $('#send').onclick = async () => {
   if (!plateOk($('#plaque').value)) { paintPlate(); $('#plaque').focus(); return; }
   if (!idOk(ID)) { paintIdent(true); return; }
   const common = { r: cur.r, k: cur.k, plate: $('#plaque').value.trim(), note: $('#note').value.trim(), who: whoName(), prenom: ID.prenom, nom: ID.nom, mail: ID.mail };
-  $('#send').disabled = true; $('#send').textContent = 'Préparation…';
-  for (const p of pending) { const pr = await p.prep; const ts = p.cam ? p.ts : (pr.exif || p.ts); await qPut(Object.assign({ id: uid(), blob: pr.blob, name: (p.file.name || 'photo').replace(/\.\w+$/, '') + '.jpg', mime: pr.mime, ts, tsSrc: p.cam ? 'camera' : pr.exif ? 'exif' : 'fichier', h0: pr.h0 || '', sz0: pr.sz0 || null, h1: pr.h1 || '', cam: p.cam, lat: p.cam && fix ? fix.lat : null, lon: p.cam && fix ? fix.lon : null, acc: p.cam && fix ? fix.acc : null, state: 'wait', added: Date.now() }, common)); URL.revokeObjectURL(p.url); }
-  pending = []; $('#send').textContent = 'Envoyer'; $('#form').classList.add('hide'); $('#pick').classList.remove('hide'); paintIdent(false);
-  await paintQueue(); flush();
+  $('#send').disabled = true; $('#send').textContent = 'Envoi…';
+  const ps = pending, bt = batch; pending = []; batch = null;
+  for (const p of ps) { await p.prep; const it = await MHIQ.get(p.id); if (!it) continue; Object.assign(it, common, { state: 'wait', sentAt: Date.now(), lat: p.cam && fix ? fix.lat : null, lon: p.cam && fix ? fix.lon : null, acc: p.cam && fix ? fix.acc : null }); await qPut(it); URL.revokeObjectURL(p.url); }
+  $('#send').textContent = 'Envoyer'; $('#form').classList.add('hide'); $('#pick').classList.remove('hide'); paintIdent(false); await paintQueue();
+  try { await MHIQ.commit(bt, true); } catch (e) { /* hors ligne : repris plus tard */ }   // photos déjà arrivées : la plaque part tout de suite (requête qui survit à la fermeture)
+  swEnvoyer(); kick();
 };
 
-const b64 = (blob) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1] || ''); r.onerror = () => rej(r.error); r.readAsDataURL(blob); });
-let flushing = false;
-async function flush() {
-  if (flushing || !navigator.onLine) return; flushing = true;
-  try {
-    const todo = (await qAll()).filter((x) => x.state === 'wait' || x.state === 'up').sort((a, b) => a.added - b.added); let stop = false;
-    const one = async (it) => {
-      it.state = 'up'; await qPut(it); paintQueue();
-      try {
-        const body = JSON.stringify({ a: 'up', k: it.k, id: it.id, name: it.name, mime: it.mime, b64: await b64(it.blob), ts: it.ts, tsSrc: it.tsSrc || (it.cam ? 'camera' : 'fichier'), cam: it.cam, lat: it.lat, lon: it.lon, acc: it.acc, plate: it.plate, note: it.note, who: it.mail ? it.who : whoName(), prenom: it.prenom || (ID && ID.prenom), nom: it.nom || (ID && ID.nom), mail: it.mail || (ID && ID.mail), h0: it.h0, sz0: it.sz0, h1: it.h1 });   // photos en attente d'une ancienne version : coordonnées actuelles
-        const r = await (await fetch(relayUrl(it.r), { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body })).json();
-        if (r.ok) { it.state = 'ok'; it.done = Date.now(); delete it.blob; it.err = ''; } else { it.state = 'bad'; it.err = r.err || 'refusé'; }
-      } catch (e) { it.state = 'wait'; it.err = navigator.onLine ? 'Envoi interrompu, nouvel essai bientôt' : ''; stop = true; }
-      await qPut(it); paintQueue();
-    };
-    const workers = Array.from({ length: Math.min(3, todo.length) }, async () => { while (todo.length && !stop) await one(todo.shift()); });   // 3 envois en parallèle
-    await Promise.all(workers);
-    for (const it of await qAll()) if (it.state === 'ok' && Date.now() - it.done > 7 * 864e5) await qDel(it.id);   // historique : 7 jours
-  } finally { flushing = false; }
+/* le service worker termine les envois même si la page est fermée (Android, ordinateur) et les relance quand le réseau revient */
+function swEnvoyer() {
+  if (!('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.ready.then((r) => { if (r.active) r.active.postMessage('envoyer'); if (r.sync) r.sync.register('mhi-envoi').catch(() => {}); }).catch(() => {});
 }
+const flush = kick;
 async function paintQueue() {
-  const L = (await qAll()).sort((a, b) => b.added - a.added).slice(0, 30);
+  const A = await qAll(), L = A.filter((x) => x.state !== 'draft').sort((a, b) => b.added - a.added).slice(0, 30);
   $('#qcard').classList.toggle('hide', !L.length);
+  const wait = A.filter((x) => x.state === 'wait'), recent = A.filter((x) => x.state === 'ok' && Date.now() - x.done < 10 * 60000);
+  $('#qsum').className = 'qsum ' + (wait.length ? 'wait' : recent.length ? 'ok' : '');
+  $('#qsum').textContent = wait.length ? (navigator.onLine ? `Envoi en cours : ${wait.length} photo${wait.length > 1 ? 's' : ''}… gardez la page ouverte quelques secondes.` : `${wait.length} photo${wait.length > 1 ? 's' : ''} en attente du réseau : elles partiront toutes seules.`) : recent.length ? '✓ Tout est arrivé chez MyHome Immobilier. Vous pouvez fermer la page.' : '';
   $('#queue').innerHTML = '';
   for (const it of L) {
     const d = document.createElement('div'); d.className = 'q';
-    const st = it.state === 'ok' ? ['ok', '✓ Envoyée'] : it.state === 'bad' ? ['bad', '✗ ' + it.err] : it.state === 'up' ? ['wait', 'Envoi…'] : ['wait', 'En attente' + (it.err ? ' · ' + it.err : '')];
+    const st = it.state === 'ok' ? ['ok', '✓ Arrivée'] : it.state === 'bad' ? ['bad', '✗ ' + it.err] : it.uploaded ? ['wait', 'Photo arrivée · plaque en cours d’envoi…'] : ['wait', navigator.onLine ? 'Envoi…' + (it.err ? ' · ' + it.err : '') : 'En attente du réseau'];
     const when = new Date(it.ts).toLocaleString('fr-CH', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
     d.innerHTML = `<div class="t">${when}${it.plate ? ' · ' + it.plate.replace(/[<&]/g, '') : ''}<br><span class="st ${st[0]}">${st[1].replace(/[<&]/g, '')}</span></div>`;
     if (it.blob) { const i = new Image(); i.src = URL.createObjectURL(it.blob); i.onload = () => URL.revokeObjectURL(i.src); d.prepend(i); }
@@ -249,8 +254,12 @@ async function paintQueue() {
 const net = () => { $('#off').classList.toggle('hide', navigator.onLine); if (navigator.onLine) { checkSite(); flush(); } };
 addEventListener('online', net); addEventListener('offline', net);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) flush(); });
-setInterval(flush, 30000);
-paintSite(); net(); paintQueue();
+setInterval(flush, 20000);
+if (MHIQ.chan) MHIQ.chan.onmessage = () => paintQueue();   // le service worker a avancé
+(async () => { const old = (await qAll()).filter((x) => x.state === 'draft'); const ids = old.filter((x) => x.uploaded).map((x) => x.id); for (const x of old) await qDel(x.id);
+  const byR = new Map(); for (const x of old) if (x.uploaded) { const k = x.r + '|' + x.k; if (!byR.has(k)) byR.set(k, []); byR.get(k).push(x.id); }
+  for (const [rk, L] of byR) { const [r, k] = rk.split('|'); MHIQ.post(r, { a: 'drop', k, ids: L }, true).catch(() => {}); } void ids;   // photos choisies puis page fermée sans « Envoyer »
+  paintSite(); net(); paintQueue(); })();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 </script>
 </body>

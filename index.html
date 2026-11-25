@@ -59,6 +59,18 @@
 <main>
   <div class="card err hide" id="nolink">Ce lien n’est pas complet. Ouvrez la page avec le code QR ou le lien reçu de MyHome Immobilier.</div>
   <div id="app" class="hide">
+    <div class="card hide" id="ident">
+      <b style="font-size:17px" id="id-title">Avant votre premier envoi</b>
+      <p class="muted" style="margin:6px 0 0">Indiquez qui vous êtes, une seule fois : vos coordonnées restent sur ce téléphone et accompagnent vos photos. MyHome Immobilier les utilise uniquement pour vous recontacter au sujet de vos photos (par exemple si elles ne sont pas assez nettes) et pour le suivi des stationnements non autorisés.</p>
+      <label for="id-prenom">Prénom <b style="color:var(--bad)">obligatoire</b></label>
+      <input id="id-prenom" maxlength="40" autocomplete="given-name" required>
+      <label for="id-nom">Nom <b style="color:var(--bad)">obligatoire</b></label>
+      <input id="id-nom" maxlength="40" autocomplete="family-name" required>
+      <label for="id-mail">Adresse e-mail <b style="color:var(--bad)">obligatoire</b></label>
+      <input id="id-mail" type="email" inputmode="email" maxlength="100" autocomplete="email" autocapitalize="off" spellcheck="false" required>
+      <div class="muted" id="id-hint" style="margin-top:8px"></div>
+      <div class="row"><button class="btn ghost hide" id="id-cancel" type="button">Annuler</button><button class="btn" id="id-ok" type="button">Continuer</button></div>
+    </div>
     <div class="card" id="pick">
       <button class="big" id="cam" type="button"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8h3l2-3h8l2 3h3v12H3z"/><circle cx="12" cy="13.5" r="3.8"/></svg>Prendre une photo</button>
       <button class="sec" id="gal" type="button">Choisir des photos déjà prises</button>
@@ -75,10 +87,10 @@
       <div class="muted" id="plhint" style="margin-top:6px">Sans plaque, impossible de savoir de quel véhicule il s’agit. Toutes les photos de cet envoi doivent montrer le même véhicule.</div>
       <label for="note">Remarque (facultatif)</label>
       <input id="note" maxlength="200" placeholder="ex. place visiteurs n° 4">
-      <label for="who">Votre nom (facultatif, gardé sur ce téléphone)</label>
-      <input id="who" maxlength="60" autocomplete="name">
+      <div class="muted" style="margin-top:12px">Envoyé par <b id="who-t"></b> · <a href="#" id="who-chg" style="color:var(--bleu)">modifier</a></div>
       <div class="row"><button class="btn ghost" id="cancel" type="button">Annuler</button><button class="btn" id="send" type="button">Envoyer</button></div>
     </div>
+    <p class="muted hide" id="who-line" style="text-align:center;margin:4px 0 14px">Vous envoyez en tant que <b id="who-t2"></b> · <a href="#" id="who-chg2" style="color:var(--bleu)">modifier</a></p>
     <div class="card hide" id="qcard"><b style="font-size:15px">Envois</b><div id="queue" style="margin-top:6px"></div></div>
   </div>
 </main>
@@ -93,9 +105,30 @@ if (qs.get('r') && qs.get('k')) { const r = qs.get('r'), k = qs.get('k'); links 
 let cur = links.find((x) => x.k === LS.get('mhi-cur', '')) || links[0];
 const relayUrl = (r) => /^https:\/\//.test(r) ? r : 'https://script.google.com/macros/s/' + r + '/exec';
 
+/* coordonnées de la personne qui envoie : demandées une seule fois, gardées sur le téléphone */
+let ID = LS.get('mhi-id', null);
+const mailOk = (v) => /^[^\s@<>]+@[^\s@<>]+\.[a-z]{2,}$/i.test(String(v || '').trim());
+const idOk = (o) => !!(o && String(o.prenom || '').trim().length >= 2 && String(o.nom || '').trim().length >= 2 && mailOk(o.mail));
+const whoName = () => (ID ? `${ID.prenom} ${ID.nom}` : '');
+function paintIdent(edit) {
+  const need = !idOk(ID) || edit; $('#ident').classList.toggle('hide', !need); $('#pick').classList.toggle('hide', need || pending.length > 0); $('#who-line').classList.toggle('hide', need || !idOk(ID) || pending.length > 0);
+  if (need) { $('#id-prenom').value = ID ? ID.prenom : ''; $('#id-nom').value = ID ? ID.nom : ''; $('#id-mail').value = ID ? ID.mail : ''; $('#id-cancel').classList.toggle('hide', !idOk(ID)); $('#id-title').textContent = idOk(ID) ? 'Vos coordonnées' : 'Avant votre premier envoi'; $('#id-hint').textContent = ''; setTimeout(() => $(ID && edit ? '#id-prenom' : '#id-prenom').focus(), 200); }
+  $('#who-t').textContent = whoName() + (ID ? ' (' + ID.mail + ')' : ''); $('#who-t2').textContent = whoName();
+}
+$('#id-ok').onclick = () => {
+  const o = { prenom: $('#id-prenom').value.trim().replace(/\s+/g, ' '), nom: $('#id-nom').value.trim().replace(/\s+/g, ' '), mail: $('#id-mail').value.trim().toLowerCase() };
+  if (o.prenom.length < 2) { $('#id-hint').innerHTML = '<span style="color:var(--bad)">Indiquez votre prénom.</span>'; $('#id-prenom').focus(); return; }
+  if (o.nom.length < 2) { $('#id-hint').innerHTML = '<span style="color:var(--bad)">Indiquez votre nom.</span>'; $('#id-nom').focus(); return; }
+  if (!mailOk(o.mail)) { $('#id-hint').innerHTML = '<span style="color:var(--bad)">Adresse e-mail incomplète, ex. prenom.nom@exemple.ch</span>'; $('#id-mail').focus(); return; }
+  ID = o; LS.set('mhi-id', ID); LS.set('mhi-who', whoName()); paintIdent(false);
+};
+$('#id-cancel').onclick = () => paintIdent(false);
+for (const k of ['#who-chg', '#who-chg2']) $(k).onclick = (e) => { e.preventDefault(); paintIdent(true); };
+for (const k of ['#id-prenom', '#id-nom', '#id-mail']) $(k).addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#id-ok').click(); } });
+
 function paintSite() {
   if (!cur) { $('#nolink').classList.remove('hide'); $('#site').textContent = ''; return; }
-  $('#app').classList.remove('hide'); $('#site').textContent = cur.site || 'Site en cours de vérification…';
+  $('#app').classList.remove('hide'); $('#site').textContent = cur.site || 'Site en cours de vérification…'; paintIdent(false);
   const sel = $('#sitesel'); sel.classList.toggle('hide', links.length < 2);
   sel.innerHTML = links.map((x) => `<option value="${x.k}"${x.k === cur.k ? ' selected' : ''}>${(x.site || x.k).replace(/[<&]/g, '')}</option>`).join('');
 }
@@ -126,7 +159,7 @@ function paintGps() { $('#gps').textContent = !pending.some((p) => p.cam) ? '' :
 function showForm() {
   $('#pick').classList.add('hide'); $('#form').classList.remove('hide');
   $('#prev').innerHTML = ''; for (const p of pending) { const i = new Image(); i.src = p.url; $('#prev').appendChild(i); }
-  $('#who').value = LS.get('mhi-who', ''); $('#plaque').value = ''; $('#note').value = ''; paintGps(); paintPlate(); setTimeout(() => $('#plaque').focus(), 300);
+  $('#who-line').classList.add('hide'); paintIdent(false); $('#pick').classList.add('hide'); $('#plaque').value = ''; $('#note').value = ''; paintGps(); paintPlate(); setTimeout(() => $('#plaque').focus(), 300);
 }
 /* date de prise de vue écrite par l'appareil (EXIF DateTimeOriginal) */
 async function exifDate(file) {
@@ -140,7 +173,10 @@ async function exifDate(file) {
 }
 /* photo réduite avant l'envoi : 2400 px de côté au maximum, sans recadrage ni filtre — la plaque reste parfaitement lisible, l'envoi est 5 à 10 fois plus rapide */
 const MAXPX = 2400;
-async function shrink(file) {
+/* empreinte SHA-256 : identifie le fichier ; la moindre retouche la change complètement */
+async function sha(blob) { try { const d = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer()); return [...new Uint8Array(d)].map((x) => x.toString(16).padStart(2, '0')).join(''); } catch (e) { return ''; } }
+async function shrink(file) { const r = await shrink0(file); r.h0 = await sha(file); r.sz0 = file.size; r.h1 = r.blob === file ? r.h0 : await sha(r.blob); return r; }
+async function shrink0(file) {
   const exif = await exifDate(file);
   try {
     const url = URL.createObjectURL(file); const img = new Image(); img.decoding = 'async';
@@ -158,7 +194,7 @@ $('#cam').onclick = () => { locate(); $('#fcam').value = ''; $('#fcam').click();
 $('#gal').onclick = () => { $('#fgal').value = ''; $('#fgal').click(); };
 $('#fcam').onchange = (e) => addFiles(e.target.files, true);
 $('#fgal').onchange = (e) => addFiles(e.target.files, false);
-$('#cancel').onclick = () => { for (const p of pending) URL.revokeObjectURL(p.url); pending = []; $('#form').classList.add('hide'); $('#pick').classList.remove('hide'); };
+$('#cancel').onclick = () => { for (const p of pending) URL.revokeObjectURL(p.url); pending = []; $('#form').classList.add('hide'); $('#pick').classList.remove('hide'); paintIdent(false); };
 const CH = /^(AG|AI|AR|BE|BL|BS|FR|GE|GL|GR|JU|LU|NE|NW|OW|SG|SH|SO|SZ|TG|TI|UR|VD|VS|ZG|ZH)[0-9]{1,6}$/;
 const plateKey = (v) => String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 const plateOk = (v) => { const k = plateKey(v); return k.length >= 4 && /[0-9]/.test(k); };
@@ -168,11 +204,11 @@ $('#plaque').oninput = (e) => { const v = e.target.value.toUpperCase().replace(/
 $('#send').onclick = async () => {
   if (!pending.length || !cur) return;
   if (!plateOk($('#plaque').value)) { paintPlate(); $('#plaque').focus(); return; }
-  const who = $('#who').value.trim(); LS.set('mhi-who', who);
-  const common = { r: cur.r, k: cur.k, plate: $('#plaque').value.trim(), note: $('#note').value.trim(), who };
+  if (!idOk(ID)) { paintIdent(true); return; }
+  const common = { r: cur.r, k: cur.k, plate: $('#plaque').value.trim(), note: $('#note').value.trim(), who: whoName(), prenom: ID.prenom, nom: ID.nom, mail: ID.mail };
   $('#send').disabled = true; $('#send').textContent = 'Préparation…';
-  for (const p of pending) { const pr = await p.prep; const ts = p.cam ? p.ts : (pr.exif || p.ts); await qPut(Object.assign({ id: uid(), blob: pr.blob, name: (p.file.name || 'photo').replace(/\.\w+$/, '') + '.jpg', mime: pr.mime, ts, tsSrc: p.cam ? 'camera' : pr.exif ? 'exif' : 'fichier', cam: p.cam, lat: p.cam && fix ? fix.lat : null, lon: p.cam && fix ? fix.lon : null, acc: p.cam && fix ? fix.acc : null, state: 'wait', added: Date.now() }, common)); URL.revokeObjectURL(p.url); }
-  pending = []; $('#send').textContent = 'Envoyer'; $('#form').classList.add('hide'); $('#pick').classList.remove('hide');
+  for (const p of pending) { const pr = await p.prep; const ts = p.cam ? p.ts : (pr.exif || p.ts); await qPut(Object.assign({ id: uid(), blob: pr.blob, name: (p.file.name || 'photo').replace(/\.\w+$/, '') + '.jpg', mime: pr.mime, ts, tsSrc: p.cam ? 'camera' : pr.exif ? 'exif' : 'fichier', h0: pr.h0 || '', sz0: pr.sz0 || null, h1: pr.h1 || '', cam: p.cam, lat: p.cam && fix ? fix.lat : null, lon: p.cam && fix ? fix.lon : null, acc: p.cam && fix ? fix.acc : null, state: 'wait', added: Date.now() }, common)); URL.revokeObjectURL(p.url); }
+  pending = []; $('#send').textContent = 'Envoyer'; $('#form').classList.add('hide'); $('#pick').classList.remove('hide'); paintIdent(false);
   await paintQueue(); flush();
 };
 
@@ -185,7 +221,7 @@ async function flush() {
     const one = async (it) => {
       it.state = 'up'; await qPut(it); paintQueue();
       try {
-        const body = JSON.stringify({ a: 'up', k: it.k, id: it.id, name: it.name, mime: it.mime, b64: await b64(it.blob), ts: it.ts, tsSrc: it.tsSrc || (it.cam ? 'camera' : 'fichier'), cam: it.cam, lat: it.lat, lon: it.lon, acc: it.acc, plate: it.plate, note: it.note, who: it.who });
+        const body = JSON.stringify({ a: 'up', k: it.k, id: it.id, name: it.name, mime: it.mime, b64: await b64(it.blob), ts: it.ts, tsSrc: it.tsSrc || (it.cam ? 'camera' : 'fichier'), cam: it.cam, lat: it.lat, lon: it.lon, acc: it.acc, plate: it.plate, note: it.note, who: it.mail ? it.who : whoName(), prenom: it.prenom || (ID && ID.prenom), nom: it.nom || (ID && ID.nom), mail: it.mail || (ID && ID.mail), h0: it.h0, sz0: it.sz0, h1: it.h1 });   // photos en attente d'une ancienne version : coordonnées actuelles
         const r = await (await fetch(relayUrl(it.r), { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body })).json();
         if (r.ok) { it.state = 'ok'; it.done = Date.now(); delete it.blob; it.err = ''; } else { it.state = 'bad'; it.err = r.err || 'refusé'; }
       } catch (e) { it.state = 'wait'; it.err = navigator.onLine ? 'Envoi interrompu, nouvel essai bientôt' : ''; stop = true; }

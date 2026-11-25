@@ -245,6 +245,14 @@ const qs = new URLSearchParams(location.search);
 let links = LS.get('mhi-links', []);   // [{r, k, site}]
 if (qs.get('r') && qs.get('k')) { const r = qs.get('r'), k = qs.get('k'); links = links.filter((x) => x.k !== k); links.unshift({ r, k, site: '' }); LS.set('mhi-links', links); LS.set('mhi-cur', k); history.replaceState(null, '', location.pathname); }
 let cur = links.find((x) => x.k === LS.get('mhi-cur', '')) || links[0];
+/* un seul choix par site : si le même site a été scanné avec plusieurs codes (lien recréé entre-temps), seul le dernier scanné reste */
+function tidyLinks() {
+  const seen = new Map(), n0 = links.length, curName = cur ? String(cur.site || '').trim().toLowerCase() : '';
+  links = links.filter((x) => { const n = String(x.site || '').trim().toLowerCase(); if (!n || n[0] === '⚠') return true; if (seen.has(n)) return false; seen.set(n, x); return true; });
+  if (cur && !links.includes(cur)) cur = seen.get(curName) || links[0];
+  if (links.length !== n0) { LS.set('mhi-links', links); if (cur) LS.set('mhi-cur', cur.k); }
+}
+tidyLinks();
 const relayUrl = (r) => /^https:\/\//.test(r) ? r : 'https://script.google.com/macros/s/' + r + '/exec';
 
 /* coordonnées de la personne qui envoie : demandées une seule fois, gardées sur le téléphone */
@@ -276,11 +284,12 @@ function paintSite() {
   sel.innerHTML = links.map((x) => `<option value="${x.k}"${x.k === cur.k ? ' selected' : ''}>${(x.site || x.k).replace(/[<&]/g, '')}</option>`).join('');
 }
 $('#sitesel').onchange = (e) => { cur = links.find((x) => x.k === e.target.value) || cur; LS.set('mhi-cur', cur.k); paintSite(); };
+/* tous les liens gardés sont vérifiés : un lien remplacé ou désactivé disparaît de la liste (sauf celui qu'on vient d'ouvrir, pour afficher l'avertissement) */
 async function checkSite() {
   if (!cur || !navigator.onLine) return;
-  try { const r = await (await fetch(relayUrl(cur.r) + '?k=' + encodeURIComponent(cur.k))).json();
-    if (r.ok) { cur.site = r.site; LS.set('mhi-links', links); } else { cur.site = '⚠ ' + (r.err || 'lien désactivé'); }
-  } catch (e) { /* hors ligne : nom gardé */ }
+  await Promise.all(links.map(async (x) => { try { const r = await (await fetch(relayUrl(x.r) + '?k=' + encodeURIComponent(x.k))).json();
+    if (r.ok) { x.site = r.site; delete x.bad; } else { x.bad = 1; x.site = '⚠ ' + (r.err || 'lien désactivé'); } } catch (e) { /* hors ligne : nom gardé */ } }));
+  links = links.filter((x) => !x.bad || x === cur); tidyLinks(); LS.set('mhi-links', links);
   paintSite();
 }
 
